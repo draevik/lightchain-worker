@@ -323,13 +323,12 @@ func TestReconciler_StartPeriodicAndStopAreClean(t *testing.T) {
 
 	r := NewReconciler(store, ch, worker, cfg, nil)
 	r.StartPeriodic(context.Background())
-	time.Sleep(45 * time.Millisecond) // expect ~4 ticks
+	// Wait for a pass instead of sleeping a fixed time: under load the loop
+	// goroutine can lose the CPU for longer than any sleep budget.
+	require.Eventually(t, func() bool { return fired.Load() >= 1 },
+		10*time.Second, time.Millisecond, "the periodic loop must run a pass")
 	r.StopPeriodic()
 	r.StopPeriodic() // idempotent
-
-	// At least one tick fired; we deliberately do not pin the upper bound
-	// because timer scheduling is non-deterministic in CI.
-	assert.GreaterOrEqual(t, fired.Load(), int32(1))
 }
 
 // W3: a transient GetJobState failure inside a chunk must NOT advance

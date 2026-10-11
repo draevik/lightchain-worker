@@ -3,7 +3,6 @@ package chain
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,31 +20,31 @@ func TestSubpoolCoordinator_WithinClassParallel(t *testing.T) {
 	c := NewSubpoolCoordinator(nil, 0)
 	defer c.Close()
 
-	var inFlight, maxInFlight atomic.Int32
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Every goroutine holds its token until all of them are in, so the
+	// in-flight count only reaches goroutines if no Enter waits for another.
+	release := make(chan struct{})
 	var wg sync.WaitGroup
 	const goroutines = 4
 	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
-			tok, err := c.Enter(context.Background(), ClassBlob)
-			require.NoError(t, err)
-			defer tok.Done()
-
-			cur := inFlight.Add(1)
-			defer inFlight.Add(-1)
-			for {
-				peak := maxInFlight.Load()
-				if cur <= peak || maxInFlight.CompareAndSwap(peak, cur) {
-					break
-				}
+			tok, err := c.Enter(ctx, ClassBlob)
+			if !assert.NoError(t, err) {
+				return
 			}
-			time.Sleep(20 * time.Millisecond)
+			defer tok.Done()
+			<-release
 		}()
 	}
-	wg.Wait()
-	assert.Equal(t, int32(goroutines), maxInFlight.Load(),
+	assert.Eventually(t, func() bool { return c.Inflight(ClassBlob) == goroutines },
+		10*time.Second, time.Millisecond,
 		"within-class Enters must run in parallel (no serialization)")
+	close(release)
+	wg.Wait()
 }
 
 // TestSubpoolCoordinator_CrossClassBlocks asserts that a Legacy Enter blocks

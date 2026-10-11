@@ -660,9 +660,10 @@ func TestScheduler_StartStopLifecycle(t *testing.T) {
 
 	s := NewScheduler(store, stub, worker, cfg, nil)
 	s.Start(context.Background())
-	time.Sleep(45 * time.Millisecond) // ~4 probes
+	// Wait for a probe instead of sleeping a fixed time: under load the loop
+	// goroutine can lose the CPU for longer than any sleep budget.
+	require.Eventually(t, func() bool { return ticks.Load() >= 1 },
+		10*time.Second, time.Millisecond, "the background loop must probe")
 	s.Stop()
 	s.Stop() // idempotent
-
-	assert.GreaterOrEqual(t, ticks.Load(), int32(1))
 }
