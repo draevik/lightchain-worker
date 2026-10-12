@@ -1,7 +1,10 @@
 # Every pull request: build, lint and test the worker, then build its image. A push to testnet also publishes the
 # image as ghcr.io/lightchain-protocol/worker, tagged with the branch and the commit.
 #
-# The worker builds only beside the shared package, so both jobs lay the two repositories out the way the Dockerfile
+# A version tag (v1.2.3) publishes the image under that tag, then a GitHub release holding the CLI binaries, the
+# installer and checksums.txt, which is where the one-line installer downloads from.
+#
+# The worker builds only beside the shared package, so every job lays the two repositories out the way the Dockerfile
 # expects: worker/ and pkg/ under one root.
 name: CI
 
@@ -9,6 +12,7 @@ on:
   pull_request:
   push:
     branches: [testnet]
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -20,6 +24,8 @@ jobs:
     defaults:
       run:
         working-directory: worker
+    outputs:
+      pkg: ${{ steps.pkg.outputs.rev }}
     steps:
       # Two commits deep, so the lint step can compare with the commit before this one.
       - &checkout
@@ -29,22 +35,27 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      # The shared package at the branch this build is for: the pull request's target, or the pushed branch. There is
-      # no fallback to another branch, so a build never runs against a package it was not meant for.
-      - &pkg
+      # The shared package at the branch this build is for: the pull request's target, or the pushed branch. A version
+      # tag is cut from testnet, so it takes the package's testnet. There is no fallback to another branch, so a build
+      # never runs against a package it was not meant for. The later jobs take the commit resolved here.
+      - id: pkg
         name: Check out the shared package
         working-directory: ${{ github.workspace }}
         run: |
-          git clone --quiet --depth 1 --branch "${GITHUB_BASE_REF:-$GITHUB_REF_NAME}" \
-            https://github.com/lightchain-protocol/lightchain-shared-pkg pkg
-          echo "pkg at $(git -C pkg rev-parse --abbrev-ref HEAD) $(git -C pkg rev-parse --short HEAD)"
+          ref="${GITHUB_BASE_REF:-$GITHUB_REF_NAME}"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then ref=testnet; fi
+          git clone --quiet --depth 1 --branch "$ref" https://github.com/lightchain-protocol/lightchain-shared-pkg pkg
+          echo "rev=$(git -C pkg rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "pkg at $ref $(git -C pkg rev-parse --short HEAD)"
 
-      - uses: actions/setup-go@v7
+      - &go
+        uses: actions/setup-go@v7
         with:
           go-version-file: worker/go.mod
           cache-dependency-path: worker/go.sum
 
-      - name: Join worker and pkg in a Go workspace
+      - &workspace
+        name: Join worker and pkg in a Go workspace
         working-directory: ${{ github.workspace }}
         run: go work init worker pkg
 
@@ -61,6 +72,9 @@ jobs:
 
       - run: make test-install
 
+      # The release build for every platform, so a version tag never meets one that does not compile.
+      - run: make release
+
   image:
     needs: check
     runs-on: ubuntu-latest
@@ -68,11 +82,22 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # One build at a time per branch, in the order the pushes arrived, so the branch tag cannot end on an older commit.
+    # One image build at a time per branch or tag.
     concurrency: image-${{ github.ref }}
     steps:
       - *checkout
-      - *pkg
+
+      # The package commit the checks ran against, not the branch as it is by now, so what ships is what was tested.
+      - &pkg
+        name: Check out the shared package the checks ran against
+        working-directory: ${{ github.workspace }}
+        env:
+          REV: ${{ needs.check.outputs.pkg }}
+        run: |
+          git init --quiet pkg
+          git -C pkg fetch --quiet --depth 1 https://github.com/lightchain-protocol/lightchain-shared-pkg "$REV"
+          git -C pkg checkout --quiet FETCH_HEAD
+          echo "pkg at $(git -C pkg rev-parse --short HEAD)"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -87,8 +112,11 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/lightchain-protocol/worker
+          # No "latest" tag, which a version tag would otherwise add: a deployment names the version or the commit.
+          flavor: latest=false
           tags: |
             type=ref,event=branch
+            type=ref,event=tag
             type=sha,prefix=
 
       # A pull request builds the image and throws it away; only a push publishes it.
@@ -99,3 +127,36 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # A version tag only, and after the image, so a release never exists without the image of the same version. A tag
+  # with a hyphen (v1.2.3-rc.1) becomes a pre-release, which GitHub does not serve as "latest", so the installer's
+  # default does not move.
+  release:
+    if: github.ref_type == 'tag'
+    needs: [check, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - *checkout
+      - *pkg
+      - *go
+      - *workspace
+
+      - run: make release
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ needs.check.outputs.pkg }}
+        run: |
+          set -- "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          case "$GITHUB_REF_NAME" in *-*) set -- "$@" --prerelease ;; esac
+          notes=$(printf 'Built from `%s` with [lightchain-shared-pkg](%s) `%s`. Image: `%s`.' "${GITHUB_SHA::7}" \
+            https://github.com/lightchain-protocol/lightchain-shared-pkg "${PKG::7}" \
+            "ghcr.io/lightchain-protocol/worker:$GITHUB_REF_NAME")
+          gh release create "$@" --notes "$notes"
