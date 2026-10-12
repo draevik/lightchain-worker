@@ -1040,8 +1040,11 @@ func (s *Service) Run(ctx context.Context) error {
 func (s *Service) gatewayHeartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.HeartbeatInterval)
 	defer ticker.Stop()
+	startedAt := time.Now()
+	probe := &http.Client{Timeout: 2 * time.Second}
 	for {
-		if err := s.gwClient.SendHeartbeat(ctx, s.gatewayHeartbeatPayload()); err != nil {
+		payload := s.gatewayHeartbeatPayload(heartbeat.CheckOllama(ctx, probe, s.cfg.OllamaURL), time.Since(startedAt))
+		if err := s.gwClient.SendHeartbeat(ctx, payload); err != nil {
 			s.logger.Warn("gateway heartbeat failed", "error", err)
 		}
 		select {
@@ -1054,16 +1057,19 @@ func (s *Service) gatewayHeartbeatLoop(ctx context.Context) {
 
 // gatewayHeartbeatPayload advertises what the Redis monitor does: the
 // dispatcher routes search sessions on capabilities and protocolVersion, and
-// the explorer compares models against the on-chain eligible set.
-func (s *Service) gatewayHeartbeatPayload() gw.HeartbeatPayload {
+// the explorer compares models against the on-chain eligible set. Status and
+// uptime are measured by the caller: the consumer API stops offering a worker
+// whose runtime reports "unreachable", so a constant here would keep a worker
+// with a dead Ollama in rotation.
+func (s *Service) gatewayHeartbeatPayload(ollamaStatus string, uptime time.Duration) gw.HeartbeatPayload {
 	return gw.HeartbeatPayload{
 		ActiveJobs:      int(s.jobCounter.Load()),
 		MaxJobs:         s.cfg.MaxConcurrentJobs,
 		Models:          s.advertisedModels,
 		Capabilities:    s.advertisedCaps,
 		ProtocolVersion: pkgtypes.WorkerProtocolVersion,
-		OllamaStatus:    "ready",
-		Uptime:          0, // parity with the legacy gateway-mode loop
+		OllamaStatus:    ollamaStatus,
+		Uptime:          int64(uptime.Seconds()),
 	}
 }
 
