@@ -157,7 +157,7 @@ func (m *Monitor) EmitOnce(ctx context.Context) error {
 // can read exactly what the worker writes (fixing Concern C-2).
 // Redis errors are returned but are non-fatal — the caller logs and continues.
 func (m *Monitor) emit(ctx context.Context) error {
-	ollamaStatus := m.checkOllama(ctx)
+	ollamaStatus := CheckOllama(ctx, m.httpClient, m.cfg.OllamaURL)
 	activeJobs := int(m.jobCounter.Load())
 
 	modelsJSON, err := json.Marshal(m.modelIDs)
@@ -217,15 +217,16 @@ func KeyTTL(interval time.Duration) time.Duration {
 	return 3 * interval
 }
 
-// checkOllama performs a GET /api/tags to the Ollama endpoint with a 2s timeout.
-// Returns "ready" on HTTP 200, "unreachable" on any error or non-200 response.
-func (m *Monitor) checkOllama(ctx context.Context) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.cfg.OllamaURL+"/api/tags", nil)
+// CheckOllama performs a GET /api/tags to the Ollama endpoint; the client's
+// timeout bounds the wait. Returns "ready" on HTTP 200, "unreachable" on any
+// error or non-200 response.
+func CheckOllama(ctx context.Context, client *http.Client, ollamaURL string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ollamaURL+"/api/tags", nil)
 	if err != nil {
 		return OllamaStatusUnreachable
 	}
 
-	resp, err := m.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return OllamaStatusUnreachable
 	}

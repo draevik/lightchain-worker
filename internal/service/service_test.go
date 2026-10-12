@@ -118,7 +118,7 @@ func TestService_gatewayHeartbeatPayload_advertisesModelsAndCapabilities(t *test
 		advertisedCaps:   []string{"search"},
 	}
 
-	body, err := json.Marshal(s.gatewayHeartbeatPayload())
+	body, err := json.Marshal(s.gatewayHeartbeatPayload("unreachable", 90*time.Second))
 	assert.NoError(t, err)
 	assert.JSONEq(t, `{
 		"activeJobs": 1,
@@ -126,7 +126,7 @@ func TestService_gatewayHeartbeatPayload_advertisesModelsAndCapabilities(t *test
 		"models": ["0xaa", "0xbb"],
 		"capabilities": ["search"],
 		"protocolVersion": 2,
-		"ollamaStatus": "ready",
-		"uptimeSeconds": 0
+		"ollamaStatus": "unreachable",
+		"uptimeSeconds": 90
 	}`, string(body))
 }
