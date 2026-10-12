@@ -4,7 +4,7 @@ The worker serves AI inference on LightChain. It claims sessions through on-chai
 
 ## Run a worker
 
-Follow the install guide: **[docs/install.md](docs/install.md)**. It goes from a bare host to a serving testnet worker. A copy for the docs site (<https://docs.lightchain.ai>, under worker-and-model / run-a-worker) is pending; until it is published, `docs/install.md` is the reference.
+Follow the install guide on the docs site: **[Run a worker on testnet with the CLI](https://docs.lightchain.ai/docs/worker-and-model/run-a-worker/testnet-cli)**. It goes from a bare host to a serving testnet worker. The same guide is in this repository as [docs/install.md](docs/install.md). For alerts when the worker needs attention, see [Worker alerts](https://docs.lightchain.ai/docs/worker-and-model/worker-alerts).
 
 In short:
 
@@ -32,8 +32,16 @@ go test ./...
 make test-install   # installer against a file:// release: good checksum installs, tampered one does not
 ```
 
-Every pull request runs these in CI (`.github/workflows/ci.yml`), along with golangci-lint on the lines it changes and a build of the Docker image.
+Every pull request runs these in CI (`.github/workflows/ci.yml`), along with golangci-lint on the lines it changes, a build of the Docker image and the release build for every platform.
 
 ## Releases
 
-`make release` writes `dist/`: one CLI binary per platform (`lightchain-worker-{linux,darwin}-{amd64,arm64}`), `install.sh`, and a `checksums.txt` (SHA-256) covering them all. Attach every file in `dist/` to a GitHub release. The installer downloads from `…/releases/latest/download/` (or `…/releases/download/<tag>/` with `LIGHTCHAIN_WORKER_VERSION`), so a release must carry all of them.
+A release is a version tag on a commit of `testnet`:
+
+```bash
+git tag v1.2.3 <commit> && git push origin v1.2.3
+```
+
+CI runs the checks on the tag, publishes the image as `ghcr.io/lightchain-protocol/worker:v1.2.3`, and creates the GitHub release with everything `make release` writes to `dist/`: one CLI binary per platform (`lightchain-worker-{linux,darwin}-{amd64,arm64}`), `install.sh`, and a `checksums.txt` (SHA-256) covering them all. The release notes are generated from the merged pull requests and can be edited afterwards.
+
+The installer downloads from `…/releases/latest/download/` (or `…/releases/download/<tag>/` with `LIGHTCHAIN_WORKER_VERSION`), so a release must carry all of those files. A tag with a hyphen (`v1.2.3-rc.1`) becomes a pre-release: it can be installed by naming it, and `latest` stays where it was.
