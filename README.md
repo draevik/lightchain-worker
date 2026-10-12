@@ -32,6 +32,8 @@ go test ./...
 make test-install   # installer against a file:// release: good checksum installs, tampered one does not
 ```
 
+Every pull request runs these in CI (`.github/workflows/ci.yml`), along with golangci-lint on the lines it changes and a build of the Docker image.
+
 ## Releases
 
 `make release` writes `dist/`: one CLI binary per platform (`lightchain-worker-{linux,darwin}-{amd64,arm64}`), `install.sh`, and a `checksums.txt` (SHA-256) covering them all. Attach every file in `dist/` to a GitHub release. The installer downloads from `…/releases/latest/download/` (or `…/releases/download/<tag>/` with `LIGHTCHAIN_WORKER_VERSION`), so a release must carry all of them.
