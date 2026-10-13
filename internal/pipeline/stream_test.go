@@ -155,6 +155,30 @@ func TestNewTokenCoalescer_NonPositiveConfigFallsBackToDefaults(t *testing.T) {
 	assert.Equal(t, defaultStreamChunkInterval, c.maxInterval)
 }
 
+// The relay refills a consumer's message bucket at 1000/minute (~16.7/s) and
+// drops frames past it, so the default batching has to stay under that at any
+// generation rate a worker actually reaches.
+func TestTokenCoalescer_DefaultsStayUnderRelayRefillRate(t *testing.T) {
+	t.Parallel()
+
+	const relayRefillPerSecond = 1000.0 / 60.0
+	const seconds = 20
+
+	for _, tokensPerSecond := range []int{10, 34, 150, 232, 320} {
+		c, clock, batches := newTestCoalescer(defaultStreamChunkTokens, defaultStreamChunkInterval)
+		gap := time.Second / time.Duration(tokensPerSecond)
+		for i := 0; i < tokensPerSecond*seconds; i++ {
+			clock.advance(gap)
+			require.NoError(t, c.Add("x"))
+		}
+		framesPerSecond := float64(len(*batches)) / seconds
+		assert.LessOrEqual(t, framesPerSecond, 10.5,
+			"%d tok/s: frame rate must stay near the 100ms interval", tokensPerSecond)
+		assert.Less(t, framesPerSecond, relayRefillPerSecond,
+			"%d tok/s: frame rate must stay under the relay's refill rate", tokensPerSecond)
+	}
+}
+
 // --- multi-kind streaming ---
 
 // capturingPublisher records every chunk frame the streamer emits, in order,
