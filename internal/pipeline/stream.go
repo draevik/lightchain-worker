@@ -68,8 +68,8 @@ func newTokenCoalescer(maxTokens int, maxInterval time.Duration, emit func(batch
 // They exist here so a JobHandler built without stream config (tests, the
 // CLI) still batches sensibly.
 const (
-	defaultStreamChunkTokens   = 8
-	defaultStreamChunkInterval = 250 * time.Millisecond
+	defaultStreamChunkTokens   = 32
+	defaultStreamChunkInterval = 100 * time.Millisecond
 )
 
 // Add appends a delta and emits the batch if either threshold is now met.

@@ -97,8 +97,8 @@ func TestLoad_ValidConfig(t *testing.T) {
 	assert.Equal(t, 1024, cfg.OllamaNumPredict)
 	assert.Equal(t, 0, cfg.OllamaNumCtx, "0 means leave the model's context window alone")
 	assert.False(t, cfg.OllamaThink, "thinking must default to off: the worker never transmits it")
-	assert.Equal(t, 8, cfg.StreamChunkTokens)
-	assert.Equal(t, 250*time.Millisecond, cfg.StreamChunkInterval)
+	assert.Equal(t, 32, cfg.StreamChunkTokens)
+	assert.Equal(t, 100*time.Millisecond, cfg.StreamChunkInterval)
 }
 
 func TestLoad_StreamingOverrides(t *testing.T) {
@@ -690,7 +690,7 @@ func TestConfig_SortitionDefaults(t *testing.T) {
 	require.Equal(t, common.Address{}, cfg.SessionManagerAddress)
 	require.Equal(t, "data/sortition-state", cfg.SortitionStateDir)
 	require.Equal(t, uint64(5000), cfg.SortitionChunkSize)
-	require.Equal(t, 4*time.Second, cfg.SortitionPollInterval)
+	require.Equal(t, time.Second, cfg.SortitionPollInterval)
 	require.Equal(t, uint64(0), cfg.SortitionConfirmations)
 	require.Equal(t, 10, cfg.SortitionSessionRetryLimit)
 }
