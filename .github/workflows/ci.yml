@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+# One run at a time per branch, pull request or tag: a later push waits for the earlier one, so the branch's image tag
+# cannot end on an older commit. A run that is still waiting gives way to a newer push.
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -82,8 +86,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # One image build at a time per branch or tag.
-    concurrency: image-${{ github.ref }}
     steps:
       - *checkout
 
@@ -113,11 +115,12 @@ jobs:
         with:
           images: ghcr.io/lightchain-protocol/worker
           # No "latest" tag, which a version tag would otherwise add: a deployment names the version or the commit.
+          # A version tag does not publish the commit tag again: the branch push already did, from the same source.
           flavor: latest=false
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            type=sha,prefix=
+            type=sha,prefix=,enable=${{ github.ref_type != 'tag' }}
 
       # A pull request builds the image and throws it away; only a push publishes it.
       - uses: docker/build-push-action@v7
