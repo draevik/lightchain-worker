@@ -28,7 +28,8 @@ type Config struct {
 	// Identity — ECDH encryption key (separate from signing key)
 	EncryptionKeystorePath string
 
-	// Chain
+	// Chain. RPCURL is one endpoint, or several separated by commas in
+	// order of preference (chain.DialRPC).
 	RPCURL                string
 	ChainID               int64
 	WorkerRegistryAddress common.Address
