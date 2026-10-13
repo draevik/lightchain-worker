@@ -25,6 +25,13 @@ import (
 // staleness against contract round-trips.
 const defaultDisputeWindowCacheTTL = 15 * time.Minute
 
+// defaultMinedWait bounds the receipt wait of a caller that brought no
+// deadline of its own. In sortition mode that is every claimSession and every
+// completeJob: without a bound, a tx the pool dropped holds its caller for
+// good, and with it a job slot or the whole session watcher. It matches the
+// blob tx's default budget, the longest of the per-stage ones.
+const defaultMinedWait = 90 * time.Second
+
 // Compile-time interface assertions.
 var (
 	_ RegistrationClient = (*ChainClient)(nil)
@@ -38,6 +45,8 @@ var (
 // AIConfig, and JobRegistry.
 type ChainClient struct {
 	ethClient *ethclient.Client
+	// minedWait overrides defaultMinedWait. Zero in production.
+	minedWait time.Duration
 	// receiptBackend is what awaitMined polls for receipts. Nil in
 	// production, where it falls back to ethClient; tests that exercise
 	// the post-broadcast half without a live EL inject a stub. Same
@@ -106,7 +115,7 @@ func NewChainClient(
 		return nil, fmt.Errorf("gasMulBps must be positive, got %d", gasMulBps)
 	}
 
-	client, err := ethclient.Dial(rpcURL)
+	client, err := DialRPC(rpcURL, DefaultRPCTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial RPC %s: %w", rpcURL, err)
 	}
@@ -365,6 +374,16 @@ func (c *ChainClient) awaitMined(
 	receiptBackend := c.receiptBackend
 	if receiptBackend == nil {
 		receiptBackend = c.ethClient
+	}
+
+	if _, bounded := ctx.Deadline(); !bounded {
+		wait := c.minedWait
+		if wait == 0 {
+			wait = defaultMinedWait
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
 	}
 
 	receipt, err := bind.WaitMined(ctx, receiptBackend, tx)

@@ -264,3 +264,56 @@ func TestSubmitPreparedTx_StillBlocksUntilMined(t *testing.T) {
 	}
 	assert.Equal(t, 0, coordinator.Inflight(ClassLegacy))
 }
+
+// TestPendingTx_WaitGivesUpOnATxThatNeverMines covers the callers that pass
+// a context with no deadline: in sortition mode that is every claimSession
+// and every completeJob. A tx the pool dropped would otherwise hold its
+// caller for good, and with it a job slot or the whole session watcher.
+func TestPendingTx_WaitGivesUpOnATxThatNeverMines(t *testing.T) {
+	t.Parallel()
+
+	coordinator := NewSubpoolCoordinator(nil, 0)
+	defer coordinator.Close()
+	client := newTestChainClient(t)
+	client.coordinator = coordinator
+	client.minedWait = 50 * time.Millisecond
+	// Gate never opens: the receipt never arrives.
+	client.receiptBackend = &stubReceiptBackend{gate: make(chan struct{})}
+
+	pending, err := client.broadcastPreparedTx(context.Background(), "CompleteJob", nil, buildLegacyTx)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- pending.Wait(context.Background()) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait is still polling for a tx that never mines")
+	}
+	assert.Equal(t, 0, coordinator.Inflight(ClassLegacy),
+		"giving up must release the broadcast slot")
+}
+
+// TestPendingTx_WaitKeepsTheCallersOwnDeadline: a stage that brings its own
+// budget (ack, blob) is not cut short by the fallback above.
+func TestPendingTx_WaitKeepsTheCallersOwnDeadline(t *testing.T) {
+	t.Parallel()
+
+	coordinator := NewSubpoolCoordinator(nil, 0)
+	defer coordinator.Close()
+	client := newTestChainClient(t)
+	client.coordinator = coordinator
+	client.minedWait = 50 * time.Millisecond
+	gate := make(chan struct{})
+	client.receiptBackend = &stubReceiptBackend{gate: gate, receipt: minedReceipt()}
+
+	pending, err := client.broadcastPreparedTx(context.Background(), "AcknowledgeJob", nil, buildLegacyTx)
+	require.NoError(t, err)
+
+	// The receipt arrives well after the fallback would have fired.
+	time.AfterFunc(300*time.Millisecond, func() { close(gate) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, pending.Wait(ctx))
+}

@@ -11,9 +11,9 @@ import (
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/lightchain/worker/internal/chain"
 	"github.com/lightchain/worker/internal/cli"
 	"github.com/lightchain/worker/internal/config"
 	"github.com/lightchain/worker/internal/heartbeat"
@@ -53,7 +53,7 @@ func runWatch() {
 		quitProcess(1)
 	}
 
-	rpc, err := ethclient.Dial(cfg.RPCURL)
+	rpc, err := chain.DialRPC(cfg.RPCURL, chain.DefaultRPCTimeout)
 	if err != nil {
 		logger.Error("dial RPC", "error", err)
 		quitProcess(1)
