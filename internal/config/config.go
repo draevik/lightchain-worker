@@ -120,8 +120,10 @@ type Config struct {
 	// Token-stream coalescing. A chunk frame is published when either
 	// StreamChunkTokens deltas or StreamChunkInterval have accumulated,
 	// whichever comes first. Batching matters because the relay enforces
-	// a per-consumer rate limit (~1000 messages/minute by default); at
-	// ~10 tok/s the defaults below emit roughly 1-4 frames/second.
+	// a per-consumer rate limit (1000 messages/minute by default, refilled
+	// at ~16.7/s) and drops the frames past it. At the defaults below the
+	// interval is the binding limit: about 10 frames/second at any
+	// generation rate up to ~320 tok/s, where the token cap takes over.
 	StreamChunkTokens   int
 	StreamChunkInterval time.Duration
 
@@ -482,8 +484,8 @@ func Load() (*Config, error) {
 	cfg.OllamaNumCtx = parseInt("OLLAMA_NUM_CTX", 0, &errs)
 	cfg.OllamaThink = parseBool("OLLAMA_THINK", false, &errs)
 	cfg.OllamaReasoningNumPredict = parseInt("OLLAMA_REASONING_NUM_PREDICT", 4096, &errs)
-	cfg.StreamChunkTokens = parseInt("STREAM_CHUNK_TOKENS", 8, &errs)
-	cfg.StreamChunkInterval = parseDuration("STREAM_CHUNK_INTERVAL", "250ms", &errs)
+	cfg.StreamChunkTokens = parseInt("STREAM_CHUNK_TOKENS", 32, &errs)
+	cfg.StreamChunkInterval = parseDuration("STREAM_CHUNK_INTERVAL", "100ms", &errs)
 	cfg.StreamReasoning = parseBool("STREAM_REASONING", true, &errs)
 
 	// Per-model generation-option overrides (heat-tier enforcement). Parsed
@@ -556,7 +558,9 @@ func Load() (*Config, error) {
 	}
 	cfg.SortitionStateDir = envOrDefault("SORTITION_STATE_DIR", "data/sortition-state")
 	cfg.SortitionChunkSize = parseUint64("SORTITION_CHUNK_SIZE", 5000, &errs)
-	cfg.SortitionPollInterval = parseDuration("SORTITION_POLL_INTERVAL", "4s", &errs)
+	// Below the 2 s block time, so a session request or job is seen within
+	// about a second of its block instead of up to two blocks later.
+	cfg.SortitionPollInterval = parseDuration("SORTITION_POLL_INTERVAL", "1s", &errs)
 	cfg.SortitionConfirmations = parseUint64("SORTITION_CONFIRMATIONS", 0, &errs)
 	cfg.SortitionSessionLookbackBlocks = parseUint64("SORTITION_SESSION_LOOKBACK_BLOCKS", 2000, &errs)
 	cfg.SortitionSessionRetryLimit = parseInt("SORTITION_SESSION_RETRY_LIMIT", 10, &errs)
