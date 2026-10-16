@@ -165,7 +165,7 @@ On its first start the worker does not read the chain's history: it starts its s
 | Back from a suspension | `lcw reinstate`, once the cooldown is over and the stake is back at the minimum. In the CLI from release v0.0.2 on |
 | Alerts | `lightchain-worker watch` posts to a Discord webhook when the worker needs attention, and again when it recovers. The unit and its install steps are in [`deploy/lightchain-worker-watch@.service`](../deploy/lightchain-worker-watch@.service) |
 | Upgrade | re-run the installer, then `sudo systemctl restart lightchain-worker` |
-| Stop | `sudo systemctl stop lightchain-worker` drains first: no new sessions, and in-flight jobs get up to `SHUTDOWN_TIMEOUT` to finish |
+| Stop | `sudo systemctl stop lightchain-worker` drains first: it claims no new sessions and starts no new jobs, and the jobs already running get up to `SHUTDOWN_TIMEOUT` to finish before the worker exits |
 | Leave | stop the service, then `lcw deregister` returns the stake once no jobs are active |
 
 Fees accrue in JobRegistry, and the worker settles them to its balance after the dispute window. A timeout or a lost dispute counts as an offense, and three offenses suspend the worker for 7 days. On testnet the slash rates are currently 0, so an offense takes no stake; on a network with non-zero rates it also takes a share of the minimum stake. Keep the host up and the models loaded, and avoid killing the service mid-job.
