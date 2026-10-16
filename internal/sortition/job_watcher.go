@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -85,13 +86,16 @@ type JobWatcher struct {
 	sessionRetryLimit int
 	lookback          uint64
 	// notActiveRetries counts consecutive chain.ErrSessionNotActive passes per
-	// jobID. Only ever touched from RunOnce, which Start() calls sequentially
+	// jobID. Only ever touched from runOnce, which Start() calls sequentially
 	// off a single ticker goroutine, so no mutex is needed. Cleared on success
 	// or on give-up.
 	notActiveRetries map[uint64]int
 	interval         time.Duration
 	log              *slog.Logger
 	syncServe        bool
+	// jobs counts the serve goroutines still running, so Start can wait for
+	// them before it returns.
+	jobs sync.WaitGroup
 }
 
 // NewJobWatcher constructs a JobWatcher from the given options.
@@ -147,8 +151,12 @@ func (w *JobWatcher) stopAndRetry(ev chain.JobSubmittedEvent, lo uint64) error {
 	return w.cursor.Set(cursorJobSubmitted, stopAt)
 }
 
-// Start runs a ticker loop calling RunOnce on each tick until ctx is cancelled.
-func (w *JobWatcher) Start(ctx context.Context) {
+// Start polls on each tick until ctx is cancelled, then returns once the jobs
+// it has served have returned. The jobs run on jobCtx rather than ctx, so
+// cancelling ctx stops intake and leaves running jobs alone; cancel jobCtx to
+// end them.
+func (w *JobWatcher) Start(ctx, jobCtx context.Context) {
+	defer w.jobs.Wait()
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
 	for {
@@ -156,7 +164,7 @@ func (w *JobWatcher) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := w.RunOnce(ctx); err != nil {
+			if err := w.runOnce(ctx, jobCtx); err != nil {
 				w.log.Warn("job watcher pass failed", "error", err)
 			}
 		}
@@ -177,7 +185,13 @@ func (w *JobWatcher) Start(ctx context.Context) {
 // A serve error (e.g. transient pipeline failure) is logged at warn and is
 // not fatal to the pass — the cursor still advances. The pipeline's own
 // on-chain ack/completion deadline handles missed completions via claimTimeout.
+//
+// Jobs served by RunOnce run on ctx; Start serves them on its own job context.
 func (w *JobWatcher) RunOnce(ctx context.Context) error {
+	return w.runOnce(ctx, ctx)
+}
+
+func (w *JobWatcher) runOnce(ctx, jobCtx context.Context) error {
 	head, err := w.c.Head(ctx)
 	if err != nil {
 		return err
@@ -317,12 +331,14 @@ func (w *JobWatcher) RunOnce(ctx context.Context) error {
 			if w.syncServe {
 				// Test hook: synchronous serve makes tests deterministic without
 				// goroutine synchronisation primitives or polling.
-				if serveErr := w.sink.HandleJobPayload(ctx, payload); serveErr != nil {
+				if serveErr := w.sink.HandleJobPayload(jobCtx, payload); serveErr != nil {
 					w.log.Warn("serve job failed", "jobId", payload.JobID, "error", serveErr)
 				}
 			} else {
+				w.jobs.Add(1)
 				go func() {
-					if serveErr := w.sink.HandleJobPayload(ctx, payload); serveErr != nil {
+					defer w.jobs.Done()
+					if serveErr := w.sink.HandleJobPayload(jobCtx, payload); serveErr != nil {
 						w.log.Warn("serve job failed", "jobId", payload.JobID, "error", serveErr)
 					}
 				}()

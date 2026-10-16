@@ -52,6 +52,12 @@ const startupHeartbeatTimeout = 5 * time.Second
 // blocking the shutdown sequence on a network round trip.
 const shutdownDrainTimeout = 10 * time.Second
 
+// jobCancelGrace is how long a sortition-mode shutdown waits for the jobs it
+// cancelled at SHUTDOWN_TIMEOUT to return, before it zeroes the session keys
+// and closes the clients they use. It covers a cancelled job publishing its
+// error frame (5 s at most).
+const jobCancelGrace = 10 * time.Second
+
 // drainTTLLookupTimeout bounds the on-chain dispute-window RPC so a hung
 // lookup cannot consume the budget reserved for the Redis write that
 // follows. Falling back to drainTTLFallback in this window leaves time
@@ -1117,8 +1123,17 @@ func (s *Service) runSortitionMode(ctx context.Context, _ context.CancelFunc) er
 	// Release subsystem runs identically across all modes.
 	s.startReleaseSubsystem(ctx)
 
+	// Jobs run on their own context: the signal stops claiming and serving
+	// new jobs, and the jobs already running keep going until they finish or
+	// SHUTDOWN_TIMEOUT runs out.
+	jobCtx, cancelJobs := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelJobs()
+
 	// Heartbeat + egress: internal profile uses the Redis monitor; external
-	// profile heartbeats over the gateway and runs the response stream.
+	// profile heartbeats over the gateway and runs the response stream. The
+	// stream stops at the signal, so a job still running then sends its
+	// complete frame over the gateway's HTTP fallback, which does not depend
+	// on a queue being flushed before the process exits.
 	if s.monitor != nil {
 		s.monitor.Start(ctx)
 	}
@@ -1131,8 +1146,13 @@ func (s *Service) runSortitionMode(ctx context.Context, _ context.CancelFunc) er
 
 	// Both chain watchers run in background goroutines; Start blocks until
 	// ctx is cancelled (ticker loop), so we launch each in its own goroutine.
+	// The JobWatcher's Start returns only once its running jobs have.
 	go s.sessionWatcher.Start(ctx)
-	go s.jobWatcher.Start(ctx)
+	jobsDone := make(chan struct{})
+	go func() {
+		defer close(jobsDone)
+		s.jobWatcher.Start(ctx, jobCtx)
+	}()
 
 	<-ctx.Done()
 	s.logger.Info("shutdown signal received, stopping gracefully")
@@ -1144,6 +1164,23 @@ func (s *Service) runSortitionMode(ctx context.Context, _ context.CancelFunc) er
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer shutdownCancel()
+
+	// shutdown closes the chain client, Redis and the session keys the jobs
+	// use, so it waits for them first. The jobs and shutdown share the one
+	// SHUTDOWN_TIMEOUT budget: after a timeout, shutdown's own bounded waits
+	// give up at once and Run reports the timeout.
+	select {
+	case <-jobsDone:
+	case <-shutdownCtx.Done():
+		s.logger.Warn("SHUTDOWN_TIMEOUT reached, cancelling the jobs still running",
+			"activeJobs", s.jobCounter.Load())
+		cancelJobs()
+		select {
+		case <-jobsDone:
+		case <-time.After(jobCancelGrace):
+			s.logger.Warn("cancelled jobs did not return in time", "grace", jobCancelGrace)
+		}
+	}
 	return s.shutdown(shutdownCtx)
 }
 
@@ -1345,7 +1382,9 @@ func (s *Service) shutdown(ctx context.Context) error {
 		}
 	}
 
-	s.chainClient.Close()
+	if s.chainClient != nil {
+		s.chainClient.Close()
+	}
 	if s.coordinator != nil {
 		s.coordinator.Close()
 	}

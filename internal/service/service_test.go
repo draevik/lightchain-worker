@@ -1,20 +1,27 @@
 package service
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lightchain/worker/internal/chain"
 	"github.com/lightchain/worker/internal/config"
+	"github.com/lightchain/worker/internal/keystore"
+	"github.com/lightchain/worker/internal/pipeline"
+	"github.com/lightchain/worker/internal/sortition"
 )
 
 func TestAsynqRedisClientOptFromRedisOptions(t *testing.T) {
@@ -129,4 +136,145 @@ func TestService_gatewayHeartbeatPayload_advertisesModelsAndCapabilities(t *test
 		"ollamaStatus": "unreachable",
 		"uptimeSeconds": 90
 	}`, string(body))
+}
+
+// oneJobClient is a chain holding a single JobSubmitted event for worker.
+type oneJobClient struct{ worker common.Address }
+
+func (oneJobClient) Head(context.Context) (chain.HeadInfo, error) {
+	return chain.HeadInfo{Number: 1}, nil
+}
+
+func (c oneJobClient) FilterJobSubmitted(context.Context, uint64, uint64) ([]chain.JobSubmittedEvent, error) {
+	return []chain.JobSubmittedEvent{{JobID: 7, SessionID: 3, Worker: c.worker, BlockNumber: 1}}, nil
+}
+
+func (oneJobClient) GetJobBlobInfo(context.Context, uint64) (promptHash, respHash common.Hash, submitBlock, completeBlock uint64, err error) {
+	return common.Hash{}, common.Hash{}, 1, 0, nil
+}
+
+func (oneJobClient) GetSessionInfo(context.Context, uint64) (chain.SessionInfo, error) {
+	return chain.SessionInfo{}, nil
+}
+
+func (oneJobClient) GetSessionEncWorkerKey(context.Context, uint64) ([]byte, error) {
+	return []byte{1}, nil
+}
+
+type anyKey struct{}
+
+func (anyKey) CanDecryptSessionKey([]byte) bool { return true }
+
+// blockingSink holds a job until release is closed or the job's context ends,
+// then reports the context's error. A cancelled job takes a moment to return,
+// as a real one does while it reports the failure.
+type blockingSink struct {
+	entered chan struct{}
+	release chan struct{}
+	ctxErr  chan error
+}
+
+func newBlockingSink() *blockingSink {
+	return &blockingSink{entered: make(chan struct{}), release: make(chan struct{}), ctxErr: make(chan error, 1)}
+}
+
+func (s *blockingSink) HandleJobPayload(ctx context.Context, _ pipeline.JobPayload) error {
+	close(s.entered)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.ctxErr <- ctx.Err()
+	return nil
+}
+
+// sortitionService is a sortition-mode Service whose JobWatcher serves one job
+// into sink and whose SessionWatcher never polls.
+func sortitionService(t *testing.T, shutdownTimeout time.Duration, sink sortition.JobSink) *Service {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cursor, err := sortition.NewCursorStore(t.TempDir())
+	require.NoError(t, err)
+	keys, err := keystore.NewSessionKeyStore(filepath.Join(t.TempDir(), "session-keys.enc"), "test")
+	require.NoError(t, err)
+	worker := common.HexToAddress("0x1")
+	jobs := &atomic.Int32{}
+	return &Service{
+		cfg:             &config.Config{ShutdownTimeout: shutdownTimeout},
+		logger:          logger,
+		jobCounter:      jobs,
+		sessionKeyStore: keys,
+		sessionWatcher:  sortition.NewSessionWatcher(sortition.SessionWatcherOpts{PollInterval: time.Hour, Logger: logger}),
+		jobWatcher: sortition.NewJobWatcher(sortition.JobWatcherOpts{
+			Client:         oneJobClient{worker: worker},
+			KeyChecker:     anyKey{},
+			Sink:           sink,
+			Cursor:         cursor,
+			Worker:         worker,
+			JobCounter:     jobs,
+			MaxConcurrent:  1,
+			LookbackBlocks: 10,
+			PollInterval:   time.Millisecond,
+			Logger:         logger,
+		}),
+	}
+}
+
+func receive[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// A SIGTERM stops intake at once, but a job already running keeps going and
+// Run returns only once it has finished.
+func TestService_Run_sortitionSignalLetsRunningJobFinish(t *testing.T) {
+	t.Parallel()
+	sink := newBlockingSink()
+	s := sortitionService(t, time.Minute, sink)
+	ctx, signal := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+
+	receive(t, sink.entered, "the job to reach the sink")
+	signal()
+
+	select {
+	case err := <-runErr:
+		t.Fatalf("Run returned while the job was still running: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(sink.release)
+	require.NoError(t, receive(t, runErr, "Run to return"))
+	assert.NoError(t, receive(t, sink.ctxErr, "the job to end"), "the signal must not cancel a running job")
+}
+
+// A job still running when SHUTDOWN_TIMEOUT runs out is cancelled, and Run
+// returns once it has.
+func TestService_Run_sortitionCancelsJobAtShutdownTimeout(t *testing.T) {
+	t.Parallel()
+	sink := newBlockingSink()
+	s := sortitionService(t, 100*time.Millisecond, sink)
+	ctx, signal := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+
+	receive(t, sink.entered, "the job to reach the sink")
+	signal()
+
+	assert.ErrorContains(t, receive(t, runErr, "Run to return"), "shutdown timeout exceeded")
+	select {
+	case err := <-sink.ctxErr:
+		assert.ErrorIs(t, err, context.Canceled)
+	default:
+		t.Fatal("Run returned before the cancelled job did")
+	}
 }
